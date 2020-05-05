@@ -1,0 +1,133 @@
+---
+title: "COVID19_Analysis"
+author: "Qizheng Wang"
+date: "4/10/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+``` {r }
+library(devtools)
+library(mgcv)
+library(gamm4)
+library(tidyverse)
+
+
+setwd("c:/Users/roder/OneDrive/Desktop/COVID")
+covid_data <- read.csv("covid_data.csv")
+
+# Plot over time
+covid_data %>% 
+  filter(country_region %in% c('Hubei','Italy','Iran','South Korea','USA')) %>% 
+  na.omit() %>% 
+  ggplot(aes(time, dead, color=country_region)) +
+  geom_point() +
+  theme_minimal()
+
+# Plot from initial death in region
+covid_data %>% 
+  filter(country_region %in% c('Hubei','Italy','Iran','South Korea','USA')) %>% 
+  na.omit() %>% 
+  ggplot(aes(timeInt, dead, color=country_region)) +
+  geom_point() +
+  theme_minimal()
+```
+
+``` {r GAM Model set up}
+## Setting up GAM Model
+## Because timeInt indicates date since the first death, so we should constrain the line to pass 
+## through the origin when timeInt = 0, indicating there are no death before any deaths occured
+
+resGam= mgcv::gam(
+  dead ~ s(timeInt, pc=0) + country_region, 
+  data=covid_data, 
+  family=poisson(link='log'))
+
+summary(resGam)
+coef(resGam)
+plot(resGam)
+
+```
+Analysis: the estimated degrees of freedom for the smooth of timeInt is 8.758, Since edf is much higher than 1, the relationship is not linear. And we can't interpret the coefficients for the smooth of timeInt because they are coefficients for the different splines taht make up our curve, but don't have a scientific interpretation, thus we cannot interpret the coefficients for country_region as usual.
+
+``` {r other GAM Model}
+resGam3= mgcv::gam(
+dead ~ s(timeInt, k=50, pc=0) + country_region, data=covid_data,
+family=poisson(link='log'), method='ML')
+plot(resGam3)
+gam.check(resGam3)
+
+resGam4 = mgcv::gam(
+dead ~ s(timeInt, k=20, pc=0) + country_region, data=covid_data,
+family=poisson(link='log'), method='ML')
+plot(resGam4)
+gam.check(resGam4)
+```
+In this part, choose different k, k =50 and k = 20. And run gam.check() for both of them.\newline
+After seeing the result, I would choose k =20 for capturing patterns in the data without overfittingthe data. However data seems highly correlated. A random effect for the country should be fitted.
+
+``` {r timeIntInd}
+covid_data$timeIntInd = covid_data$timeInt
+resGammInd = gamm4::gamm4(
+dead ~ country_region +
+s(timeInt, k=20, pc=0),
+random = ~ (1|timeIntInd),
+data=covid_data, family=poisson(link='log'))
+plot(resGammInd$gam)
+summary(resGammInd$mer)
+summary(resGammInd$gam)
+```
+
+So use counry_region nessted within timIntInd to fit another same model.\newline
+This suggests a tren where there is a shaper increase in the deaths per day over the first 25 days to a month and the number decreases the following 30 days.
+
+``` {r predected deaths over time}
+covid_data_2 <- expand_grid(covid_data$timeInt, covid_data$country_region) %>%
+as_tibble() %>%
+rename(timeInt = 1, country_region = 2) %>%
+distinct()
+covid_data_2$predicted <- predict(resGammInd$gam, newdata=covid_data_2, type="response")
+
+covid_data_2 %>%
+ggplot(aes(timeInt, predicted, colour=country_region)) +
+geom_line() +
+theme_minimal() +
+facet_wrap(~country_region) +
+ggtitle("Predicted deaths over time (time = 0 is first death)")
+
+```
+
+``` {r Fitting the model with random slope for time}
+
+covid_data$timeSlope = covid_data$timeInt/100
+resGammSlope = gamm4::gamm4(
+dead ~ country_region + s(timeInt, k=30, pc=0),
+random = ~(0+timeSlope|country_region) +
+(1|timeIntInd:country_region),
+data=covid_data, family=poisson(link='log'))
+
+plot(resGammSlope$gam)
+summary(resGammSlope$mer)
+names(lme4::ranef(resGammSlope$mer))
+theRanef = lme4::ranef(resGammSlope$mer, condVar = TRUE)$country_region
+(theRanefVec = sort(drop(t(theRanef))))
+Dcountry = 'France'
+toPredict = expand.grid(
+timeInt = 0:100,
+country_region = Dcountry)
+toPredict$timeSlope = toPredict$timeIntInd =
+toPredict$timeInt
+
+thePred = predict(resGammSlope$gam,
+newdata=toPredict, se.fit=TRUE)
+matplot(toPredict$timeInt,
+exp(do.call(cbind, thePred) %*% Pmisc::ciMat(0.75)),
+type='l',
+col=c('black','grey','grey'),
+ylim = c(0, 25))
+points(covid_data[covid_data$country_region == Dcountry,c('timeInt','dead')],
+col='red')
+```
